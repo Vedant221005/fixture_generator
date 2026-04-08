@@ -5,6 +5,23 @@ export type Match = {
   away: Team
 }
 
+export type MatchScore = {
+  homeGoals: number | null
+  awayGoals: number | null
+}
+
+export type TeamStanding = {
+  team: Team
+  played: number
+  won: number
+  draw: number
+  lost: number
+  goalsFor: number
+  goalsAgainst: number
+  goalDifference: number
+  points: number
+}
+
 export type Group = {
   name: string
   teams: Team[]

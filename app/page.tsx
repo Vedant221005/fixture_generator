@@ -70,9 +70,6 @@ export default function Home() {
           <h1 className="text-4xl font-black uppercase tracking-tight text-[#6bff8f] md:text-5xl">
             Generate Fixtures
           </h1>
-          <p className="mt-3 text-[#ababa8]">
-            Enter teams and create grouped round-robin fixtures.
-          </p>
         </div>
 
         <div className="space-y-8">
