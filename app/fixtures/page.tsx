@@ -6,6 +6,7 @@ import { Copy, Trophy, X } from "lucide-react"
 
 import {
   generateFixtures,
+  formatMatchDateTime,
   type Group,
   type Match,
   type MatchScore,
@@ -15,6 +16,8 @@ import {
 
 const STORAGE_KEY = "fixture-generator-data"
 
+type ScheduleMap = Record<string, string>
+
 type FixturePayload = {
   teams: Team[]
   groupSize: number
@@ -22,6 +25,8 @@ type FixturePayload = {
   generatedAt: string
   matchScores: Record<string, MatchScore>
   knockoutScores: Record<string, MatchScore>
+  matchSchedules: ScheduleMap
+  knockoutSchedules: ScheduleMap
 }
 
 type KnockoutRound = "quarterfinal" | "semifinal" | "final"
@@ -32,6 +37,7 @@ type KnockoutMatch = {
   label: string
   home: Team | null
   away: Team | null
+  scheduledAt: string
 }
 
 type QualifiedTeam = {
@@ -66,8 +72,39 @@ function compareStandings(a: TeamStanding, b: TeamStanding): number {
   return a.team.localeCompare(b.team)
 }
 
+function toDateTimeLocalValue(scheduledAt: string): string {
+  const date = new Date(scheduledAt)
+
+  if (Number.isNaN(date.getTime())) {
+    return ""
+  }
+
+  const localDate = new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+  return localDate.toISOString().slice(0, 16)
+}
+
+function fromDateTimeLocalValue(value: string): string | null {
+  if (!value) {
+    return null
+  }
+
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return null
+  }
+
+  return date.toISOString()
+}
+
+function resolveScheduledAt(key: string, scheduledAt: string, overrides?: ScheduleMap): string {
+  return overrides?.[key] ?? scheduledAt
+}
+
 function buildShareText(
   groups: Group[],
+  generatedAt?: string,
+  matchSchedules?: ScheduleMap,
 ): string {
   const header = ["🏆 FIXTURE GENERATOR", "📅 Match Schedule"]
 
@@ -75,14 +112,16 @@ function buildShareText(
     const lines: string[] = [`📍 ${group.name}`, "👥 Teams:"]
     group.teams.forEach((team) => lines.push(`- ${team}`))
 
-    const fixtures = generateFixtures(group.teams)
+    const fixtures = generateFixtures(group.teams, generatedAt)
     lines.push("⚽ Fixtures:")
 
     if (fixtures.length === 0) {
       lines.push("- Not enough teams")
     } else {
       fixtures.forEach((match) => {
-        lines.push(`- ${match.home} vs ${match.away}`)
+        const key = getMatchKey(group.name, match)
+        const scheduledAt = resolveScheduledAt(key, match.scheduledAt, matchSchedules)
+        lines.push(`- ${match.home} vs ${match.away} | ${formatMatchDateTime(scheduledAt)}`)
       })
     }
 
@@ -90,6 +129,50 @@ function buildShareText(
   })
 
   return [...header, ...groupSections].join("\n\n")
+}
+
+function buildKnockoutCopyText(
+  knockoutStage: {
+    quarterfinals: KnockoutMatch[]
+    semifinals: KnockoutMatch[]
+    final: KnockoutMatch | null
+  },
+  knockoutSchedules?: ScheduleMap,
+): string {
+  const sections: string[] = ["🏆 KNOCKOUT STAGE"]
+
+  if (knockoutStage.quarterfinals.length > 0) {
+    sections.push("Quarter Finals:")
+    knockoutStage.quarterfinals.forEach((match) => {
+      const key = getKnockoutMatchKey(match.round, match.id)
+      const scheduledAt = resolveScheduledAt(key, match.scheduledAt, knockoutSchedules)
+      sections.push(
+        `- ${match.label}: ${match.home ?? "TBD"} vs ${match.away ?? "TBD"} | ${formatMatchDateTime(scheduledAt)}`,
+      )
+    })
+  }
+
+  if (knockoutStage.semifinals.length > 0) {
+    sections.push("Semi Finals:")
+    knockoutStage.semifinals.forEach((match) => {
+      const key = getKnockoutMatchKey(match.round, match.id)
+      const scheduledAt = resolveScheduledAt(key, match.scheduledAt, knockoutSchedules)
+      sections.push(
+        `- ${match.label}: ${match.home ?? "TBD"} vs ${match.away ?? "TBD"} | ${formatMatchDateTime(scheduledAt)}`,
+      )
+    })
+  }
+
+  if (knockoutStage.final) {
+    const key = getKnockoutMatchKey(knockoutStage.final.round, knockoutStage.final.id)
+    const scheduledAt = resolveScheduledAt(key, knockoutStage.final.scheduledAt, knockoutSchedules)
+    sections.push("Final:")
+    sections.push(
+      `- ${knockoutStage.final.label}: ${knockoutStage.final.home ?? "TBD"} vs ${knockoutStage.final.away ?? "TBD"} | ${formatMatchDateTime(scheduledAt)}`,
+    )
+  }
+
+  return sections.join("\n\n")
 }
 
 function computeStandings(group: Group, fixtures: Match[], matchScores: Record<string, MatchScore>): TeamStanding[] {
@@ -398,7 +481,27 @@ function compareQualified(a: QualifiedTeam, b: QualifiedTeam): number {
   return a.team.localeCompare(b.team)
 }
 
-function createCrossGroupQuarterfinals(teams: QualifiedTeam[]): KnockoutMatch[] {
+function createKnockoutScheduledAt(baseDate: Date, dayOffset: number): string {
+  const scheduledDate = new Date(baseDate)
+  scheduledDate.setDate(scheduledDate.getDate() + dayOffset)
+  return scheduledDate.toISOString()
+}
+
+function getKnockoutBaseDate(groups: Group[], generatedAt?: string): Date {
+  const groupFixtures = groups.flatMap((group) => generateFixtures(group.teams, generatedAt))
+  const latestFixtureTime = groupFixtures.reduce((latest, match) => {
+    const matchTime = new Date(match.scheduledAt).getTime()
+    return Number.isNaN(matchTime) ? latest : Math.max(latest, matchTime)
+  }, 0)
+
+  const baseDate = new Date(latestFixtureTime || generatedAt || Date.now())
+  baseDate.setDate(baseDate.getDate() + 1)
+  baseDate.setHours(18, 0, 0, 0)
+
+  return baseDate
+}
+
+function createCrossGroupQuarterfinals(teams: QualifiedTeam[], baseDate: Date): KnockoutMatch[] {
   const seeded = [...teams].sort(compareQualified)
   const available = [...seeded]
   const quarterfinals: KnockoutMatch[] = []
@@ -433,6 +536,7 @@ function createCrossGroupQuarterfinals(teams: QualifiedTeam[]): KnockoutMatch[] 
       label: `Quarter Final ${matchNumber}`,
       home: home.team,
       away: away.team,
+      scheduledAt: createKnockoutScheduledAt(baseDate, matchNumber - 1),
     })
   }
 
@@ -527,6 +631,7 @@ function buildKnockoutBracket(
   matchScores: Record<string, MatchScore>,
   standings: TeamStanding[],
   knockoutScores: Record<string, MatchScore>,
+  generatedAt?: string,
 ): {
   qualified: TeamStanding[]
   quarterfinals: KnockoutMatch[]
@@ -535,6 +640,7 @@ function buildKnockoutBracket(
 } {
   const qualified = standings
   const totalTeams = standings.length
+  const knockoutBaseDate = getKnockoutBaseDate(groups, generatedAt)
 
   if (qualified.length < 2) {
     return {
@@ -568,6 +674,7 @@ function buildKnockoutBracket(
         label: "Final",
         home: qualified[0]?.team ?? null,
         away: qualified[1]?.team ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 0),
       },
     }
   }
@@ -594,6 +701,7 @@ function buildKnockoutBracket(
       label: match.label,
       home: match.home,
       away: match.away,
+      scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, match.id === "sf1" ? 0 : 1),
     }))
 
     const sfWinners = sfSlots.map((match) => resolveWinner("semifinal", match.id, match.home, match.away))
@@ -608,6 +716,7 @@ function buildKnockoutBracket(
         label: "Final",
         home: sfWinners[0] ?? null,
         away: sfWinners[1] ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 3),
       },
     }
   }
@@ -634,6 +743,7 @@ function buildKnockoutBracket(
       label: match.label,
       home: match.home,
       away: match.away,
+      scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, match.id === "sf1" ? 0 : 1),
     }))
 
     const sfWinners = sfSlots.map((match) => resolveWinner("semifinal", match.id, match.home, match.away))
@@ -648,6 +758,7 @@ function buildKnockoutBracket(
         label: "Final",
         home: sfWinners[0] ?? null,
         away: sfWinners[1] ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 3),
       },
     }
   }
@@ -664,6 +775,7 @@ function buildKnockoutBracket(
         label: "Quarter Final 1",
         home: a1?.team ?? null,
         away: b2?.team ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 0),
       },
       {
         id: "qf2",
@@ -671,6 +783,7 @@ function buildKnockoutBracket(
         label: "Quarter Final 2",
         home: b1?.team ?? null,
         away: a2?.team ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 1),
       },
       {
         id: "qf3",
@@ -678,6 +791,7 @@ function buildKnockoutBracket(
         label: "Quarter Final 3",
         home: c1?.team ?? null,
         away: d2?.team ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 2),
       },
       {
         id: "qf4",
@@ -685,10 +799,11 @@ function buildKnockoutBracket(
         label: "Quarter Final 4",
         home: d1?.team ?? null,
         away: c2?.team ?? null,
+        scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 3),
       },
     ]
   } else {
-    quarterfinals = createCrossGroupQuarterfinals(qfQualified)
+    quarterfinals = createCrossGroupQuarterfinals(qfQualified, knockoutBaseDate)
   }
 
   const qfWinners = quarterfinals.map((match) => resolveWinner("quarterfinal", match.id, match.home, match.away))
@@ -700,6 +815,7 @@ function buildKnockoutBracket(
       label: "Semi Final 1",
       home: qfWinners[0] ?? null,
       away: qfWinners[1] ?? null,
+      scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 5),
     },
     {
       id: "sf2",
@@ -707,6 +823,7 @@ function buildKnockoutBracket(
       label: "Semi Final 2",
       home: qfWinners[2] ?? null,
       away: qfWinners[3] ?? null,
+      scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 6),
     },
   ]
 
@@ -718,6 +835,7 @@ function buildKnockoutBracket(
     label: "Final",
     home: sfWinners[0] ?? null,
     away: sfWinners[1] ?? null,
+    scheduledAt: createKnockoutScheduledAt(knockoutBaseDate, 8),
   }
 
   return {
@@ -731,6 +849,7 @@ function buildKnockoutBracket(
 export default function FixturesPage() {
   const [fixtureData, setFixtureData] = useState<FixturePayload | null>(null)
   const [copied, setCopied] = useState(false)
+  const [copiedKnockout, setCopiedKnockout] = useState(false)
   const [isTableOpen, setIsTableOpen] = useState(false)
 
   useEffect(() => {
@@ -749,6 +868,12 @@ export default function FixturesPage() {
         parsed.matchScores && typeof parsed.matchScores === "object" ? parsed.matchScores : {}
       const knockoutScores =
         parsed.knockoutScores && typeof parsed.knockoutScores === "object" ? parsed.knockoutScores : {}
+      const matchSchedules =
+        parsed.matchSchedules && typeof parsed.matchSchedules === "object" ? parsed.matchSchedules : {}
+      const knockoutSchedules =
+        parsed.knockoutSchedules && typeof parsed.knockoutSchedules === "object"
+          ? parsed.knockoutSchedules
+          : {}
 
       setFixtureData({
         teams,
@@ -757,6 +882,8 @@ export default function FixturesPage() {
         generatedAt,
         matchScores,
         knockoutScores,
+        matchSchedules,
+        knockoutSchedules,
       })
     } catch {
       localStorage.removeItem(STORAGE_KEY)
@@ -768,7 +895,7 @@ export default function FixturesPage() {
   const groupsWithFixtures = useMemo(() => {
     return (fixtureData?.groups ?? []).map((group) => ({
       ...group,
-      fixtures: generateFixtures(group.teams),
+      fixtures: generateFixtures(group.teams, fixtureData?.generatedAt),
     }))
   }, [fixtureData])
 
@@ -804,6 +931,7 @@ export default function FixturesPage() {
       fixtureData?.matchScores ?? {},
       groupStageStandings,
       fixtureData?.knockoutScores ?? {},
+      fixtureData?.generatedAt,
     )
   }, [groupStageComplete, groupStageStandings, fixtureData])
 
@@ -830,9 +958,23 @@ export default function FixturesPage() {
       return
     }
 
-    const text = buildShareText(fixtureData?.groups ?? [])
+    const text = buildShareText(
+      fixtureData?.groups ?? [],
+      fixtureData?.generatedAt,
+      fixtureData?.matchSchedules ?? {},
+    )
     await navigator.clipboard.writeText(text)
     setCopied(true)
+  }
+
+  const handleCopyKnockout = async () => {
+    if (!groupStageComplete || knockoutStage.qualified.length < 2) {
+      return
+    }
+
+    const text = buildKnockoutCopyText(knockoutStage, fixtureData?.knockoutSchedules ?? {})
+    await navigator.clipboard.writeText(text)
+    setCopiedKnockout(true)
   }
 
   const handleGoalChange = (
@@ -861,6 +1003,30 @@ export default function FixturesPage() {
     const nextPayload: FixturePayload = {
       ...fixtureData,
       matchScores: nextScores,
+    }
+
+    setFixtureData(nextPayload)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPayload))
+  }
+
+  const handleMatchScheduleChange = (groupName: string, match: Match, value: string) => {
+    if (!fixtureData) {
+      return
+    }
+
+    const key = getMatchKey(groupName, match)
+    const scheduledAt = fromDateTimeLocalValue(value)
+    const nextSchedules = { ...fixtureData.matchSchedules }
+
+    if (scheduledAt) {
+      nextSchedules[key] = scheduledAt
+    } else {
+      delete nextSchedules[key]
+    }
+
+    const nextPayload: FixturePayload = {
+      ...fixtureData,
+      matchSchedules: nextSchedules,
     }
 
     setFixtureData(nextPayload)
@@ -899,8 +1065,34 @@ export default function FixturesPage() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPayload))
   }
 
+  const handleKnockoutScheduleChange = (match: KnockoutMatch, value: string) => {
+    if (!fixtureData) {
+      return
+    }
+
+    const key = getKnockoutMatchKey(match.round, match.id)
+    const scheduledAt = fromDateTimeLocalValue(value)
+    const nextSchedules = { ...fixtureData.knockoutSchedules }
+
+    if (scheduledAt) {
+      nextSchedules[key] = scheduledAt
+    } else {
+      delete nextSchedules[key]
+    }
+
+    const nextPayload: FixturePayload = {
+      ...fixtureData,
+      knockoutSchedules: nextSchedules,
+    }
+
+    setFixtureData(nextPayload)
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(nextPayload))
+  }
+
   const renderKnockoutMatch = (match: KnockoutMatch) => {
-    const score = fixtureData?.knockoutScores[getKnockoutMatchKey(match.round, match.id)]
+    const key = getKnockoutMatchKey(match.round, match.id)
+    const score = fixtureData?.knockoutScores[key]
+    const scheduledAt = resolveScheduledAt(key, match.scheduledAt, fixtureData?.knockoutSchedules)
     const winner = getWinnerFromScore(match.home, match.away, score)
     const isDisabled = !match.home || !match.away
 
@@ -914,6 +1106,19 @@ export default function FixturesPage() {
           <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#ababa8]">
             {winner ? `Winner: ${winner}` : "Pending"}
           </span>
+        </div>
+
+        <div className="flex flex-col gap-2 border-t border-[#474846]/20 pt-3 md:flex-row md:items-center md:justify-between">
+          <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#ababa8]">
+            {formatMatchDateTime(scheduledAt)}
+          </span>
+          <input
+            type="datetime-local"
+            value={toDateTimeLocalValue(scheduledAt)}
+            onChange={(event) => handleKnockoutScheduleChange(match, event.target.value)}
+            className="h-9 rounded-md border border-[#474846] bg-black px-3 text-xs font-semibold text-[#faf9f5] outline-none transition focus:border-[#6bff8f]/40"
+            aria-label={`${match.label} date and time`}
+          />
         </div>
 
         <div className="flex items-center justify-between gap-3">
@@ -1028,46 +1233,66 @@ export default function FixturesPage() {
                       {group.fixtures.length === 0 ? (
                         <p className="text-sm text-[#ababa8]">Not enough teams in this group.</p>
                       ) : (
-                        group.fixtures.map((match: Match) => (
-                          <div
-                            key={`${match.home}-${match.away}`}
-                            className="glass-panel flex items-center justify-between gap-4 rounded-2xl p-4 transition hover:border-[#6bff8f]/40 md:p-6"
-                          >
-                            <div className="flex min-w-0 flex-1 items-center gap-3">
-                              <span className="font-semibold">{match.home}</span>
-                            </div>
+                        group.fixtures.map((match: Match) => {
+                          const key = getMatchKey(group.name, match)
+                          const scheduledAt = resolveScheduledAt(key, match.scheduledAt, fixtureData?.matchSchedules)
 
-                            <div className="flex items-center gap-2 px-2 text-center">
+                          return (
+                            <div
+                              key={`${match.home}-${match.away}`}
+                              className="glass-panel flex flex-col gap-4 rounded-2xl p-4 transition hover:border-[#6bff8f]/40 md:p-6"
+                            >
+                              <div className="flex flex-col gap-2 pb-3 md:flex-row md:items-center md:justify-between">
+                                <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#ababa8]">
+                                  {formatMatchDateTime(scheduledAt)}
+                                </span>
                                 <input
-                                  type="number"
-                                  min={0}
-                                  inputMode="numeric"
-                                  value={fixtureData?.matchScores[getMatchKey(group.name, match)]?.homeGoals ?? ""}
-                                  onChange={(event) =>
-                                    handleGoalChange(group.name, match, "homeGoals", event.target.value)
-                                  }
-                                  className="h-9 w-14 rounded-md border border-[#474846] bg-black px-2 text-center text-sm font-bold text-[#faf9f5] outline-none focus:border-[#6bff8f]/40"
-                                  aria-label={`${match.home} goals`}
+                                  type="datetime-local"
+                                  value={toDateTimeLocalValue(scheduledAt)}
+                                  onChange={(event) => handleMatchScheduleChange(group.name, match, event.target.value)}
+                                  className="h-9 rounded-md border border-[#474846] bg-black px-3 text-xs font-semibold text-[#faf9f5] outline-none transition focus:border-[#6bff8f]/40"
+                                  aria-label={`${match.home} vs ${match.away} date and time`}
                                 />
-                                <span className="text-xs font-bold uppercase tracking-[0.2em] text-[#ababa8]">:</span>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  inputMode="numeric"
-                                  value={fixtureData?.matchScores[getMatchKey(group.name, match)]?.awayGoals ?? ""}
-                                  onChange={(event) =>
-                                    handleGoalChange(group.name, match, "awayGoals", event.target.value)
-                                  }
-                                  className="h-9 w-14 rounded-md border border-[#474846] bg-black px-2 text-center text-sm font-bold text-[#faf9f5] outline-none focus:border-[#6bff8f]/40"
-                                  aria-label={`${match.away} goals`}
-                                />
-                            </div>
+                              </div>
 
-                            <div className="flex min-w-0 flex-1 items-center justify-end gap-3 text-right">
-                              <span className="font-semibold">{match.away}</span>
+                              <div className="flex items-center justify-between gap-4">
+                                <div className="flex min-w-0 flex-1 items-center gap-3">
+                                  <span className="font-semibold">{match.home}</span>
+                                </div>
+
+                                <div className="flex items-center gap-2 px-2 text-center">
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    inputMode="numeric"
+                                    value={fixtureData?.matchScores[key]?.homeGoals ?? ""}
+                                    onChange={(event) =>
+                                      handleGoalChange(group.name, match, "homeGoals", event.target.value)
+                                    }
+                                    className="h-9 w-14 rounded-md border border-[#474846] bg-black px-2 text-center text-sm font-bold text-[#faf9f5] outline-none focus:border-[#6bff8f]/40"
+                                    aria-label={`${match.home} goals`}
+                                  />
+                                  <span className="text-xs font-bold uppercase tracking-[0.2em] text-[#ababa8]">:</span>
+                                  <input
+                                    type="number"
+                                    min={0}
+                                    inputMode="numeric"
+                                    value={fixtureData?.matchScores[key]?.awayGoals ?? ""}
+                                    onChange={(event) =>
+                                      handleGoalChange(group.name, match, "awayGoals", event.target.value)
+                                    }
+                                    className="h-9 w-14 rounded-md border border-[#474846] bg-black px-2 text-center text-sm font-bold text-[#faf9f5] outline-none focus:border-[#6bff8f]/40"
+                                    aria-label={`${match.away} goals`}
+                                  />
+                                </div>
+
+                                <div className="flex min-w-0 flex-1 items-center justify-end gap-3 text-right">
+                                  <span className="font-semibold">{match.away}</span>
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        ))
+                          )
+                        })
                       )}
                     </div>
                   </article>
@@ -1077,13 +1302,22 @@ export default function FixturesPage() {
           </section>
 
           <section className="mx-auto max-w-7xl px-6 pb-10">
-            <div className="mb-6 flex items-end justify-between gap-4">
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
               <div>
                 <h3 className="text-3xl font-black uppercase tracking-tight text-white">Knockout Stage</h3>
                 <p className="mt-1 text-xs font-bold uppercase tracking-[0.2em] text-[#6bff8f]">
                   Quarter Final, Semi Final, Final
                 </p>
               </div>
+
+              <button
+                onClick={handleCopyKnockout}
+                disabled={!groupStageComplete || knockoutStage.qualified.length < 2}
+                className="flex items-center gap-2 rounded-full border border-[#474846] bg-[#242623] px-5 py-3 text-xs font-bold uppercase tracking-wider text-[#faf9f5] transition hover:bg-[#6bff8f]/20 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <Copy className="size-4" />
+                {copiedKnockout ? "Copied Knockout" : "Copy Knockout"}
+              </button>
 
             </div>
 
